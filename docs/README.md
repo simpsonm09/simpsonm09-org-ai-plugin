@@ -8,6 +8,7 @@
 
 ## Release notes
 
+- [Deny unsupported governed writes outside the fleet](release-notes/2026-10-24-deny-unsupported-outside-fleet.md) describes the focused unknown-repository decision change.
 - [Pin the access resolver in the plugin package](release-notes/2026-10-15-pinned-gate-resolver.md) describes the resolver update.
 - [Resolve exact standalone repositories](release-notes/2026-10-22-standalone-owned-gate.md) describes the resolver and gate integration.
 - [Conservative GitHub write detection](release-notes/2026-10-15-conservative-write-detection.md) describes Codex's bounded text-based write signal.
