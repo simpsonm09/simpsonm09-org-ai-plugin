@@ -37,6 +37,7 @@ const MINT_TIMEOUT_MS = 20_000;
  *   loadCommittedCatalog: (dir: string) => unknown | null,
  *   loadCommittedOwnedForks: (dir: string) => unknown | null,
  *   loadCommittedOwnedRepositories: (dir: string) => unknown | null,
+ *   loadCommittedIgnore: (dir: string) => unknown | null,
  *   resolveLevel: (catalog: unknown, repoName: string) => { level?: unknown },
  *   resolveDestination: (input: Record<string, unknown>) => Record<string, unknown>,
  *   decideTarget: (target: unknown, intent: unknown) => { capability: string | null, allowed: boolean },
@@ -96,6 +97,7 @@ function isAccessApi(value) {
     typeof api?.loadCommittedCatalog === "function" &&
     typeof api?.loadCommittedOwnedForks === "function" &&
     typeof api?.loadCommittedOwnedRepositories === "function" &&
+    typeof api?.loadCommittedIgnore === "function" &&
     typeof api?.resolveLevel === "function" &&
     typeof api?.resolveDestination === "function" &&
     typeof api?.decideTarget === "function"
@@ -143,6 +145,7 @@ function targetFor(
   roster,
   ownedForks,
   ownedRepositories,
+  ignore,
   repo,
   observation,
 ) {
@@ -151,6 +154,7 @@ function targetFor(
     roster,
     ownedForks,
     ownedRepositories,
+    ignore,
     localRepo: repo,
     host: observed?.host ?? "",
     destination: observed?.destination ?? "",
@@ -213,11 +217,16 @@ function accessFromApi(api, catalogDir, repo, observation) {
     typeof resolved.level === "string" ? resolved.level : fallbackLevel();
   const ownedForks = api.loadCommittedOwnedForks(catalogDir);
   const ownedRepositories = api.loadCommittedOwnedRepositories(catalogDir);
+  const ignore = api.loadCommittedIgnore(catalogDir);
+  if (ignore === null) {
+    return { code: 2, stdout: "", catalogMissing: false };
+  }
   const target = targetFor(
     api,
     roster,
     ownedForks,
     ownedRepositories,
+    ignore,
     repo,
     observation,
   );

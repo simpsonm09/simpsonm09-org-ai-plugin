@@ -13,3 +13,4 @@
 - [Conservative GitHub write detection](release-notes/2026-10-15-conservative-write-detection.md) describes Codex's bounded text-based write signal.
 - [Trust direct Claude plugin copies](release-notes/2026-10-15-trust-direct-claude-plugin-copy.md) describes the recognized Claude install layout.
 - [Explain unresolved personal-fork sync context](release-notes/2026-10-22-fork-sync-context-diagnostic.md) describes the focused denial reason for a sync without a known local clone identity.
+- [Prepare the three-level observer consumer](release-notes/2026-10-24-three-level-observer-consumer.md) records observer classifications and the published API 5 source alignment.
