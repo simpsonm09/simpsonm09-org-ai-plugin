@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   classifyResolver,
   contextLine,
+  decideShell,
   denyCommand,
   gateShellEdit,
   isGovernedCommand,
@@ -15,6 +16,7 @@ import {
   shouldInject,
   tokenUsable,
 } from "../gate.mjs";
+import { observeCommand } from "../lib/intent.mjs";
 import { canonicalCommand, programName } from "../lib/program.mjs";
 
 const ws = resolve("workspace");
@@ -35,6 +37,652 @@ function readerFor(url: string | null) {
     return null;
   };
 }
+
+type GroupLocation = "outside" | "fleet";
+type FiniteGroupCase = readonly [
+  name: string,
+  command: string,
+  outsideAction: "pass" | "deny",
+  fleetAction: "pass" | "deny",
+  readOnly: boolean,
+  ghWriteSignal: boolean,
+  outsideCalls: number,
+  fleetCalls: number,
+];
+
+function decideGroupCommand(
+  command: string,
+  cwd: string,
+  location: GroupLocation,
+  calls: import("../lib/observation.mjs").Observation[],
+) {
+  return decideShell(
+    { command },
+    {
+      cwd,
+      workspaceRoot: ws,
+      lookup: () => ({ repo: location === "fleet" ? "demo-repo" : null }),
+      git: () => readerFor("https://github.com/simpsonm09-org/demo-repo.git"),
+      resolve: (_repo, observation) => {
+        calls.push(observation);
+        return {
+          code: observation.readOnly ? 0 : 1,
+          stdout: JSON.stringify({
+            level: "propose",
+            capability: observation.capability,
+            allowed: observation.readOnly,
+            kind:
+              observation.readOnly && observation.destination
+                ? "ignored"
+                : "org",
+            destination: observation.destination
+              ? `${observation.destination.owner}/${observation.destination.repo}`
+              : "simpsonm09-org/demo-repo",
+          }),
+        };
+      },
+      env: [],
+    },
+  );
+}
+
+function assertGroupCase(
+  [
+    name,
+    command,
+    outsideAction,
+    fleetAction,
+    readOnly,
+    ghWriteSignal,
+    outsideCalls,
+    fleetCalls,
+  ]: FiniteGroupCase,
+  location: GroupLocation,
+) {
+  const calls: import("../lib/observation.mjs").Observation[] = [];
+  const cwd =
+    location === "fleet" ? join(reposRoot, "demo-repo") : join(ws, "elsewhere");
+  const observation = observeCommand(command, {
+    cwd,
+    git: readerFor("https://github.com/simpsonm09-org/demo-repo.git"),
+  });
+  assert.equal(
+    observation.readOnly,
+    readOnly,
+    `${location}: ${name}: readOnly`,
+  );
+  assert.equal(
+    observation.ghWriteSignal,
+    ghWriteSignal,
+    `${location}: ${name}: ghWriteSignal`,
+  );
+
+  const decision = decideGroupCommand(command, cwd, location, calls);
+  assert.equal(
+    decision.action,
+    location === "outside" ? outsideAction : fleetAction,
+    `${location}: ${name}: ${command}`,
+  );
+  assert.equal(
+    calls.length,
+    location === "outside" ? outsideCalls : fleetCalls,
+    `${location}: ${name}: resolver calls`,
+  );
+  if (calls.length)
+    assert.equal(calls.at(-1)?.readOnly, readOnly, `${location}: ${name}`);
+  if (name.includes("gh write") && location === "outside")
+    assert.equal(
+      calls.length,
+      0,
+      `${location}: ${name} must deny before resolver`,
+    );
+  if (name.includes("push") && !readOnly && location === "fleet")
+    assert.equal(calls.at(-1)?.readOnly, false, `${location}: ${name}`);
+}
+
+test("decideShell closes finite group boundaries in and outside the fleet", () => {
+  const table = [
+    ["git read", "git fetch origin", "deny", "deny", true, false, 1, 1],
+    [
+      "brace ignored read",
+      "{ git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; }",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "wrapper brace ignored read",
+      "command { git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; }",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    ["git push", "git push origin main", "pass", "deny", false, false, 0, 1],
+    [
+      "subshell push",
+      "(git push origin main)",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "spaced subshell push",
+      "( git push origin main )",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "negated push",
+      "! git push origin main",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "if then push",
+      "if true; then git push origin main; fi",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "else push",
+      "if false; then echo a; else git push origin main; fi",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "else gh write",
+      "if false; then :; else gh pr merge 52 -R simpsonm09-org/demo-repo --merge; fi",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "else ignored read",
+      "if false; then :; else git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; fi",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "brace local git status",
+      "{ git status; }",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "no-space subshell local git status",
+      "(git status)",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "subshell local git status",
+      "( git status )",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "brace local git log",
+      "{ git log --oneline; }",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "brace local git add",
+      "{ git add .; }",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "brace local git commit",
+      "{ git commit -m x; }",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "local grouped git before governed",
+      "if true; then git status; else git push origin main; fi",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "assignment only compound",
+      "X=1; echo hi",
+      "pass",
+      "pass",
+      true,
+      false,
+      0,
+      1,
+    ],
+    [
+      "opaque push then gh write",
+      "{ git push origin main; }; gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then grouped gh write",
+      "{ git push origin main; }; { gh pr merge 52 -R simpsonm09-org/demo-repo --merge; }",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then negated gh write",
+      "{ git push origin main; }; ! gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then command gh write",
+      "{ git push origin main; }; command gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then if-then gh write",
+      "{ git push origin main; }; if true; then gh pr merge 52 -R simpsonm09-org/demo-repo --merge; fi",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then subshell gh write",
+      "{ git push origin main; }; ( gh pr merge 52 -R simpsonm09-org/demo-repo --merge )",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then do gh write",
+      "{ git push origin main; }; for x in a; do gh pr merge 52 -R simpsonm09-org/demo-repo --merge; done",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "grouped push then ignored read",
+      "{ git push origin main; }; { git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; }",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "grouped push then plain ignored gh read",
+      "{ git push origin main; }; gh repo view acme/ignored",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "grouped push then plain ignored git read",
+      "{ git push origin main; }; git fetch https://github.com/simpsonm09/steam_wishlist_cleanup",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "plain push then plain ignored gh read",
+      "git push origin main; gh repo view acme/ignored",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "plain ignored gh read then grouped push",
+      "gh repo view acme/ignored; { git push origin main; }",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    [
+      "grouped merge then view",
+      "{ gh pr merge 52 -R simpsonm09-org/demo-repo --merge; }; { gh pr view 52 -R simpsonm09-org/demo-repo; }",
+      "deny",
+      "deny",
+      true,
+      true,
+      0,
+      0,
+    ],
+    [
+      "if then push then gh write",
+      "if true; then git push origin main; fi; gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "subshell push then gh write",
+      "( git push origin main ) && gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "else push then gh write",
+      "if false; then echo a; else git push origin main; fi; gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "expanded assignment then gh write",
+      "X=$(echo hi); gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "expanded assignment gh write",
+      "X=$(gh pr merge 52 -R simpsonm09-org/demo-repo --merge)",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "for do push",
+      "for x in a; do git push origin main; done",
+      "pass",
+      "deny",
+      false,
+      false,
+      0,
+      1,
+    ],
+    [
+      "brace gh write",
+      "{ gh pr merge 52 -R simpsonm09-org/demo-repo --merge; }",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "wrapper gh write",
+      "command gh pr merge 52 -R simpsonm09-org/demo-repo --merge",
+      "deny",
+      "deny",
+      false,
+      true,
+      0,
+      1,
+    ],
+    [
+      "wrapper gh read",
+      "command gh pr view 52 -R simpsonm09-org/demo-repo",
+      "deny",
+      "deny",
+      true,
+      false,
+      0,
+      0,
+    ],
+    ["local control", "{ echo local; }", "pass", "pass", true, false, 0, 1],
+  ] as const;
+
+  for (const testCase of table satisfies readonly FiniteGroupCase[])
+    for (const location of ["outside", "fleet"] as const)
+      assertGroupCase(testCase, location);
+});
+
+test("opaque read and write aggregation is invariant to segment order", () => {
+  const segments = [
+    "{ git push origin main; }",
+    "{ gh pr merge 52 -R simpsonm09-org/demo-repo --merge; }",
+    "{ git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; }",
+    "{ gh pr view 52 -R simpsonm09-org/demo-repo; }",
+  ];
+  const permutations = [
+    [0, 1, 2, 3],
+    [0, 1, 3, 2],
+    [0, 2, 1, 3],
+    [0, 2, 3, 1],
+    [0, 3, 1, 2],
+    [0, 3, 2, 1],
+    [1, 0, 2, 3],
+    [1, 0, 3, 2],
+    [1, 2, 0, 3],
+    [1, 2, 3, 0],
+    [1, 3, 0, 2],
+    [1, 3, 2, 0],
+    [2, 0, 1, 3],
+    [2, 0, 3, 1],
+    [2, 1, 0, 3],
+    [2, 1, 3, 0],
+    [2, 3, 0, 1],
+    [2, 3, 1, 0],
+    [3, 0, 1, 2],
+    [3, 0, 2, 1],
+    [3, 1, 0, 2],
+    [3, 1, 2, 0],
+    [3, 2, 0, 1],
+    [3, 2, 1, 0],
+  ];
+
+  for (const order of permutations) {
+    const command = order.map((index) => segments[index]).join("; ");
+    const expectedRead = order.includes(2) || order.includes(3);
+    const expectedGhWrite = order.includes(1);
+    const observation = observeCommand(command, {
+      cwd: join(ws, "elsewhere"),
+      git: readerFor("https://github.com/simpsonm09-org/demo-repo.git"),
+    });
+    assert.equal(observation.readOnly, expectedRead, command);
+    assert.equal(observation.ghWriteSignal, expectedGhWrite, command);
+
+    for (const location of ["outside", "fleet"] as const) {
+      const calls: import("../lib/observation.mjs").Observation[] = [];
+      const cwd =
+        location === "fleet"
+          ? join(reposRoot, "demo-repo")
+          : join(ws, "elsewhere");
+      const decision = decideShell(
+        { command },
+        {
+          cwd,
+          workspaceRoot: ws,
+          lookup: () => ({ repo: location === "fleet" ? "demo-repo" : null }),
+          git: () =>
+            readerFor("https://github.com/simpsonm09-org/demo-repo.git"),
+          resolve: (_repo, intent) => {
+            calls.push(intent);
+            return {
+              code: intent.readOnly ? 0 : 1,
+              stdout: JSON.stringify({
+                level: "propose",
+                capability: intent.capability,
+                allowed: intent.readOnly,
+                kind: intent.readOnly && intent.destination ? "ignored" : "org",
+                destination: "simpsonm09-org/demo-repo",
+              }),
+            };
+          },
+          env: [],
+        },
+      );
+      assert.equal(decision.action, "deny", `${location}: ${command}`);
+      assert.equal(
+        calls.length,
+        location === "fleet" && !expectedRead ? 1 : 0,
+        `${location}: ${command}`,
+      );
+    }
+  }
+});
+
+test("plain and grouped reads and writes fail closed in each segment order", () => {
+  const segments = [
+    "{ git push origin main; }",
+    "git push origin main",
+    "gh repo view acme/ignored",
+    "{ git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; }",
+  ];
+  const permutations = [
+    [0, 1, 2, 3],
+    [0, 2, 1, 3],
+    [0, 3, 1, 2],
+    [1, 0, 2, 3],
+    [1, 2, 3, 0],
+    [2, 0, 3, 1],
+    [2, 1, 0, 3],
+    [2, 3, 0, 1],
+    [3, 0, 1, 2],
+    [3, 1, 2, 0],
+    [3, 2, 1, 0],
+    [1, 3, 2, 0],
+  ];
+
+  for (const order of permutations) {
+    const command = order.map((index) => segments[index]).join("; ");
+    const observation = observeCommand(command, {
+      cwd: join(ws, "elsewhere"),
+      git: readerFor("https://github.com/simpsonm09-org/demo-repo.git"),
+    });
+    assert.equal(observation.readOnly, true, command);
+    assert.equal(observation.ghWriteSignal, false, command);
+    for (const location of ["outside", "fleet"] as const) {
+      const calls: import("../lib/observation.mjs").Observation[] = [];
+      const cwd =
+        location === "fleet"
+          ? join(reposRoot, "demo-repo")
+          : join(ws, "elsewhere");
+      const decision = decideShell(
+        { command },
+        {
+          cwd,
+          workspaceRoot: ws,
+          lookup: () => ({ repo: location === "fleet" ? "demo-repo" : null }),
+          git: () =>
+            readerFor("https://github.com/simpsonm09-org/demo-repo.git"),
+          resolve: (_repo, intent) => {
+            calls.push(intent);
+            return { code: intent.readOnly ? 0 : 1, stdout: "{}" };
+          },
+          env: [],
+        },
+      );
+      assert.equal(decision.action, "deny", `${location}: ${command}`);
+      assert.equal(calls.length, 0, `${location}: ${command}`);
+    }
+  }
+});
 
 test("repoFromCwd names the clone for a directory inside a repo", () => {
   assert.equal(
@@ -86,6 +734,114 @@ test("isGovernedCommand is the observer without a git port: writes and pushes ye
   // A quoted mention is not a program word, so it is not a governed write.
   assert.equal(isGovernedCommand('echo "gh pr create"'), false);
   assert.equal(isGovernedCommand("gh.exe api -X POST /repos"), true);
+});
+
+test("a destination-bearing read checks explicit ignore before the public-read path", () => {
+  const base = {
+    cwd: join(reposRoot, "demo-repo"),
+    workspaceRoot: ws,
+    lookup: () => ({ repo: null }),
+    git: () => null,
+  };
+  const ignored = decideShell(
+    { command: "gh repo view -R acme/ignored" },
+    {
+      ...base,
+      resolve: () => ({
+        code: 0,
+        stdout: JSON.stringify({
+          level: "read",
+          allowed: true,
+          kind: "ignored",
+        }),
+      }),
+    },
+  );
+  assert.equal(ignored.action, "deny");
+
+  const unavailable = decideShell(
+    { command: "gh repo view -R acme/public" },
+    { ...base, resolve: () => ({ code: 2, stdout: "" }) },
+  );
+  assert.equal(unavailable.action, "deny");
+});
+
+test("compound ignored reads are denied while public compound reads retain baseline access", () => {
+  const decide = (destination: string) =>
+    decideShell(
+      { command: `echo before && gh repo view ${destination}` },
+      {
+        cwd: join(reposRoot, "demo-repo"),
+        workspaceRoot: ws,
+        lookup: () => ({ repo: null }),
+        git: () => null,
+        resolve: (_repo, observation) => ({
+          code: 0,
+          stdout: JSON.stringify({
+            level: "read",
+            kind:
+              observation.destination?.repo === "ignored"
+                ? "ignored"
+                : "public",
+            allowed: true,
+          }),
+        }),
+      },
+    );
+  assert.equal(decide("acme/ignored").action, "deny");
+  assert.equal(decide("acme/public").action, "pass");
+});
+
+test("a missing git reader makes remote reads unsupported instead of throwing", () => {
+  const result = decideShell(
+    { command: "git fetch https://github.com/acme/repo" },
+    {
+      cwd: join(reposRoot, "demo-repo"),
+      workspaceRoot: ws,
+      lookup: () => ({ repo: null }),
+      git: () => null,
+      resolve: () => ({ code: 0, stdout: "{}" }),
+    },
+  );
+  assert.equal(result.action, "deny");
+});
+
+test("the shared gate preserves merge capability and never grants admin or review writes", () => {
+  const decide = (command: string) =>
+    decideShell(
+      { command },
+      {
+        cwd: join(reposRoot, "demo-repo"),
+        workspaceRoot: ws,
+        lookup: () => ({ repo: "demo-repo" }),
+        git: () => null,
+        resolve: (_repo, observation) => ({
+          code: observation.capability === "mergePr" ? 0 : 1,
+          stdout: JSON.stringify({
+            level: "merge",
+            capability: observation.capability,
+            allowed: observation.capability === "mergePr",
+          }),
+        }),
+      },
+    );
+  assert.equal(
+    decide("gh pr merge 1 -m -R simpsonm09-org/demo-repo").action,
+    "pass",
+  );
+  assert.equal(
+    decide("gh pr merge 1 --admin -R simpsonm09-org/demo-repo").action,
+    "deny",
+  );
+  assert.equal(
+    decide("gh pr edit 1 --milestone 2 -R simpsonm09-org/demo-repo").action,
+    "deny",
+  );
+  assert.equal(
+    decide("gh api -X POST repos/simpsonm09-org/demo-repo/pulls/1/reviews")
+      .action,
+    "deny",
+  );
 });
 
 test("denyCommand prints to stderr and exits non-zero in POSIX form", () => {

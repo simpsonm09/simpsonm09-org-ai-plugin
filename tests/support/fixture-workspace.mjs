@@ -172,8 +172,43 @@ export function buildWorkspace(dir, { level = "read" } = {}) {
     "repos",
     "simpsonm09-repo-catalog",
   );
+  writeFileSync(
+    join(catalog, "ignore.json"),
+    `${JSON.stringify(
+      {
+        ignore: [
+          {
+            name: "pdf_field_automation_acrobat",
+            reason: "test ignore",
+            agentAccessIgnore: [
+              "simpsonm09/pdf_field_automation_acrobat",
+              "simpsonm09-org/pdf_field_automation_acrobat",
+            ],
+          },
+          {
+            name: "steam_wishlist_cleanup",
+            reason: "test ignore",
+            agentAccessIgnore: [
+              "simpsonm09/steam_wishlist_cleanup",
+              "simpsonm09-org/steam_wishlist_cleanup",
+            ],
+          },
+          {
+            name: "The_Gaming_Index_Video_Game_Database_Final_Capstone",
+            reason: "test ignore",
+            agentAccessIgnore: [
+              "simpsonm09/The_Gaming_Index_Video_Game_Database_Final_Capstone",
+              "simpsonm09-org/The_Gaming_Index_Video_Game_Database_Final_Capstone",
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
   git(catalog, ["init", "--quiet", "-b", "main"]);
-  git(catalog, ["add", "repos.json"]);
+  git(catalog, ["add", "repos.json", "ignore.json"]);
   git(catalog, ["commit", "--quiet", "--no-verify", "-m", "fixture catalog"]);
   git(catalog, [
     "remote",

@@ -600,20 +600,362 @@ test("gh pr create reads the head and base sides", () => {
   });
 });
 
-test("gh pr merge and the admin verbs carry their own capability", () => {
-  const cases: Array<[string, string]> = [
-    ["gh pr merge 1 -R simpsonm09/pstack-max", "mergePr"],
-    ["gh release create v1 -R simpsonm09/pstack-max", "admin"],
-    ["gh workflow run ci.yml -R simpsonm09/pstack-max", "admin"],
-    ["gh secret set X -R simpsonm09/pstack-max", "admin"],
-    ["gh repo edit --description y -R simpsonm09/pstack-max", "admin"],
-    ["gh issue create -R simpsonm09/pstack-max", "admin"],
+test("gh writes carry their policy operation and capability", () => {
+  const cases: Array<[string, string, string]> = [
+    ["gh pr merge 1 -R simpsonm09/pstack-max", "mergePr", "mergePr"],
+    ["gh pr merge 1 -m -R simpsonm09/pstack-max", "mergePr", "mergePr"],
+    ["gh pr merge 1 --admin -R simpsonm09/pstack-max", "admin", "forbidden"],
+    ["gh release create v1 -R simpsonm09/pstack-max", "admin", "admin"],
+    ["gh workflow run ci.yml -R simpsonm09/pstack-max", "admin", "admin"],
+    ["gh secret set X -R simpsonm09/pstack-max", "admin", "admin"],
+    ["gh repo edit --description y -R simpsonm09/pstack-max", "admin", "admin"],
+    ["gh issue create -R simpsonm09/pstack-max", "openPr", "openPr"],
+    [
+      "gh pr edit 1 --add-label ready -R simpsonm09/pstack-max",
+      "openPr",
+      "openPr",
+    ],
+    [
+      "gh pr edit 1 --add-reviewer octocat --add-assignee monalisa --remove-label stale -R simpsonm09/pstack-max",
+      "openPr",
+      "openPr",
+    ],
+    ["gh pr close 1 -R simpsonm09/pstack-max", "openPr", "openPr"],
+    ["gh pr reopen 1 -R simpsonm09/pstack-max", "openPr", "openPr"],
+    ["gh pr ready 1 --undo -R simpsonm09/pstack-max", "openPr", "openPr"],
+    ["gh pr review 1 --approve -R simpsonm09/pstack-max", "admin", "forbidden"],
+    [
+      "gh pr review-comment 1 --body x -R simpsonm09/pstack-max",
+      "admin",
+      "forbidden",
+    ],
+    [
+      "gh milestone create --title x -R simpsonm09/pstack-max",
+      "admin",
+      "admin",
+    ],
+    [
+      "gh milestone edit 1 --due-date 2026-11-01 -R simpsonm09/pstack-max",
+      "admin",
+      "admin",
+    ],
+    ["gh milestone delete 1 -R simpsonm09/pstack-max", "admin", "admin"],
+    ["gh issue edit 1 -m 2 -R simpsonm09/pstack-max", "admin", "admin"],
+    [
+      "gh issue edit 1 --title fixed --body-file notes.md --milestone 2 --add-label ready --add-assignee monalisa --add-project Roadmap --remove-project Old -R simpsonm09/pstack-max",
+      "admin",
+      "admin",
+    ],
+    [
+      "gh pr edit 1 --add-label ready --milestone 2 -R simpsonm09/pstack-max",
+      "admin",
+      "admin",
+    ],
+    [
+      "gh issue create --title bug --milestone 2 -R simpsonm09/pstack-max",
+      "admin",
+      "admin",
+    ],
+    [
+      "gh pr create --title change --milestone 2 -R simpsonm09/pstack-max",
+      "admin",
+      "admin",
+    ],
   ];
-  for (const [command, capability] of cases) {
+  for (const [command, operation, capability] of cases) {
     const observed = observeShellCommand(clone("owned-fork"), command);
     assert.equal(observed.capability, capability, command);
-    assert.equal(observed.operation, capability, command);
+    assert.equal(observed.operation, operation, command);
   }
+});
+
+test("positional gh repo view and clone identify the requested repo, not clone directory", () => {
+  for (const command of [
+    "gh repo view simpsonm09/steam_wishlist_cleanup",
+    "gh repo view https://github.com/simpsonm09/steam_wishlist_cleanup",
+    "gh repo clone simpsonm09/steam_wishlist_cleanup local-copy",
+  ]) {
+    const observed = observeShellCommand(clone("owned-fork"), command);
+    assert.deepEqual(
+      observed.destination,
+      {
+        host: "github.com",
+        owner: "simpsonm09",
+        repo: "steam_wishlist_cleanup",
+      },
+      command,
+    );
+    assert.equal(observed.readOnly, true, command);
+  }
+});
+
+test("repo fork checks its named source and malformed view URLs do not fall back to cwd", () => {
+  const ignoredFork = observeShellCommand(
+    clone("owned-fork"),
+    "gh repo fork simpsonm09/steam_wishlist_cleanup",
+  );
+  assert.equal(ignoredFork.capability, "admin");
+  assert.equal(ignoredFork.destination?.repo, "steam_wishlist_cleanup");
+  assert.equal(ignoredFork.destinationSource, "explicit");
+
+  const otherFork = observeShellCommand(
+    clone("owned-fork"),
+    "gh repo fork acme/ordinary-repo",
+  );
+  assert.equal(otherFork.capability, "admin");
+  assert.equal(otherFork.destination?.owner, "acme");
+  assert.equal(otherFork.destination?.repo, "ordinary-repo");
+
+  for (const command of [
+    "gh repo view https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main",
+    "gh repo clone https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main local",
+    "gh repo view simpsonm09/steam_wishlist_cleanup/extra",
+  ]) {
+    const observed = observeCommand(command, {
+      cwd: "/fake/worktree",
+      git: ownedForkPort,
+    });
+    assert.equal(observed.destination, null, command);
+    assert.equal(observed.resolved, false, command);
+    assert.equal(observed.kind, "unsupported", command);
+    assert.equal(observed.readOnly, true, command);
+  }
+  assert.equal(
+    observeShellCommand(
+      clone("owned-fork"),
+      "gh repo view https://github.com/acme/ordinary-repo",
+    ).destination?.repo,
+    "ordinary-repo",
+  );
+});
+
+test("malformed URL-like gh repo positionals never fall back to cwd for writes", () => {
+  for (const command of [
+    "gh repo fork https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main",
+    "gh repo edit https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main --description x",
+    "gh repo rename https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main renamed",
+    "gh repo archive https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main --yes",
+    "gh repo unarchive https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main --yes",
+    "gh repo sync https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main",
+    "gh repo delete https://github.com/simpsonm09/steam_wishlist_cleanup/tree/main --yes",
+  ]) {
+    const observed = observeCommand(command, {
+      cwd: "/fake/worktree",
+      git: ownedForkPort,
+    });
+    assert.equal(observed.destination, null, command);
+    assert.equal(observed.destinationSource, "explicit", command);
+    assert.equal(observed.resolved, false, command);
+    assert.equal(observed.readOnly, false, command);
+    assert.equal(observed.capability, "admin", command);
+  }
+});
+
+test("REST and GraphQL review writes are never-granted", () => {
+  for (const command of [
+    "gh api -X POST repos/acme/demo/pulls/1/reviews -f event=APPROVE",
+    "gh api --unknown-option repos/acme/demo/pulls/1/reviews -X POST",
+    "gh api repos/acme/demo/pulls/1/reviews/2/dismissals -X PUT -f message=x",
+    "gh api -X POST repos/acme/demo/pulls/1/comments?per_page=10#recent",
+    "gh api -X POST https://api.github.com/repos/acme/demo/pulls/1/reviews?x=1#top -f event=APPROVE",
+    "gh api -X POST https://api.github.com/repos/acme/demo/pulls/1/comments?x=1",
+    `gh api graphql -f 'query=mutation { addPullRequestReview(input: {}) { clientMutationId } }'`,
+    "gh api --unknown-opt graphql -f query='mutation { updatePullRequestReview(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { updatePullRequestReviewComment(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { deletePullRequestReview(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { deletePullRequestReviewComment(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { resolveReviewThread(input: {}) { thread { id } } }'",
+    "gh api graphql -f query='mutation { unresolveReviewThread(input: {}) { thread { id } } }'",
+  ]) {
+    const observed = observeShellCommand(clone("owned-fork"), command);
+    assert.equal(observed.capability, "forbidden", command);
+  }
+  for (const command of [
+    "gh api https://api.github.com/repos/acme/demo/issues/1 -X POST",
+    "gh api graphql -f query='mutation { closeIssue(input: {}) { issue { id } } }'",
+  ])
+    assert.equal(
+      observeShellCommand(clone("owned-fork"), command).capability,
+      "admin",
+      command,
+    );
+  const unsupportedUrl = observeShellCommand(
+    clone("owned-fork"),
+    "gh api -X POST http://api.github.com/repos/acme/demo/pulls/1/reviews",
+  );
+  assert.equal(unsupportedUrl.resolved, false);
+  assert.equal(unsupportedUrl.capability, "forbidden");
+});
+
+test("review-comment item mutations and ambiguous review paths are forbidden", () => {
+  for (const command of [
+    "gh api -X PATCH repos/acme/demo/pulls/comments/5 -f body=x",
+    "gh api -X DELETE repos/acme/demo/pulls/comments/5",
+    "gh api -X POST repos/acme/demo/pulls/1/%72eviews -f event=APPROVE",
+    "gh api -X POST repos/acme/demo/pulls//1/reviews -f event=APPROVE",
+  ]) {
+    assert.equal(
+      observeCommand(command, { cwd: "/fake/worktree", git: ownedForkPort })
+        .capability,
+      "forbidden",
+      command,
+    );
+  }
+  const get = observeCommand("gh api -X GET repos/acme/demo/pulls/comments/5", {
+    cwd: "/fake/worktree",
+    git: ownedForkPort,
+  });
+  assert.equal(get.capability, null);
+  assert.equal(get.readOnly, true);
+  assert.equal(
+    observeCommand("gh api -X POST repos/acme/demo/issues/1/comments", {
+      cwd: "/fake/worktree",
+      git: ownedForkPort,
+    }).capability,
+    "admin",
+  );
+});
+
+test("single-destination git reads expose canonical GitHub identities for ignore checks", () => {
+  const cwd = clone("owned-fork");
+  const cases: Array<[string, string, string]> = [
+    ["git clone https://github.com/acme/demo.git demo", "acme", "demo"],
+    ["git fetch upstream", "michael-denyer", "pstack-claude"],
+    ["git pull origin main", "simpsonm09", "pstack-max"],
+    ["git ls-remote https://github.com/acme/demo.git", "acme", "demo"],
+  ];
+  for (const [command, owner, repo] of cases) {
+    const observed = observeShellCommand(cwd, command);
+    assert.equal(observed.readOnly, true, command);
+    assert.deepEqual(observed.destination, {
+      host: "github.com",
+      owner,
+      repo,
+    });
+  }
+  assert.equal(
+    observeShellCommand(cwd, "git fetch --all").kind,
+    OBSERVATION_KINDS.unsupported,
+  );
+  assert.equal(
+    observeShellCommand(cwd, "git fetch").kind,
+    OBSERVATION_KINDS.unsupported,
+  );
+});
+
+test("ambiguous GitHub-like read URLs and unresolved remotes are unsupported reads", () => {
+  const urls = [
+    "https://github.com/simpsonm09/demo-fork/../steam_wishlist_cleanup",
+    "https://github.com./simpsonm09/steam_wishlist_cleanup",
+    "https://github.com/simpsonm09/steam%5Fwishlist_cleanup",
+  ];
+  for (const url of urls) {
+    const observed = observeCommand(`git fetch ${url}`, {
+      cwd: "/fake/worktree",
+      git: (args) =>
+        args.slice(-3, -1).join(" ") === "ls-remote --get-url"
+          ? (args.at(-1) ?? null)
+          : null,
+    });
+    assert.equal(observed.kind, "unsupported", url);
+    assert.equal(observed.readOnly, true, url);
+    assert.equal(observed.destination, null, url);
+  }
+  const unresolvedRemote = observeCommand("git fetch origin", {
+    cwd: "/fake/worktree",
+    git: () => null,
+  });
+  assert.equal(unresolvedRemote.kind, "unsupported");
+  assert.equal(unresolvedRemote.readOnly, true);
+});
+
+test("git read flags keep recurse-submodules URLs in the positional stream", () => {
+  const ignored = "https://github.com/simpsonm09/steam_wishlist_cleanup";
+  for (const command of [
+    `git fetch --recurse-submodules ${ignored}`,
+    `git pull --recurse-submodules ${ignored}`,
+    `git clone --recurse-submodules ${ignored} demo`,
+    `echo x && git fetch --recurse-submodules ${ignored}`,
+  ]) {
+    const observed = observeShellCommand(clone("owned-fork"), command);
+    const reads = observed.destinationReads ?? [observed];
+    assert.ok(
+      reads.some(
+        (read) =>
+          read.destination?.owner === "simpsonm09" &&
+          read.destination.repo === "steam_wishlist_cleanup",
+      ),
+      command,
+    );
+  }
+  for (const command of [
+    `git fetch --recurse-submodules=on-demand ${ignored}`,
+    `git fetch ${ignored}`,
+  ]) {
+    const observed = observeShellCommand(clone("owned-fork"), command);
+    assert.equal(observed.kind, "read", command);
+    assert.equal(observed.destination?.repo, "steam_wishlist_cleanup", command);
+  }
+});
+
+test("raw git read URLs use the command-scoped offline insteadOf result", () => {
+  const command =
+    "git -C . -c url.https://github.com/acme/rewritten.insteadOf=https://github.com/acme/original ls-remote https://github.com/acme/original";
+  const calls: string[][] = [];
+  const observed = observeCommand(command, {
+    cwd: "/nowhere",
+    git: (args) => {
+      calls.push(args);
+      if (args.at(-3) === "ls-remote" && args.at(-2) === "--get-url")
+        return "https://github.com/acme/rewritten";
+      return null;
+    },
+  });
+  assert.equal(observed.destination?.repo, "rewritten");
+  assert.ok(
+    calls.some(
+      (args) =>
+        args[0] === "-C" &&
+        args[1] === "." &&
+        args[2] === "-c" &&
+        args[3].startsWith(
+          "url.https://github.com/acme/rewritten.insteadOf=",
+        ) &&
+        args.slice(-3).join(" ") ===
+          "ls-remote --get-url https://github.com/acme/original",
+    ),
+  );
+});
+
+test("compound directory changes with reads remain unsupported", () => {
+  for (const command of [
+    "cd /elsewhere && git fetch origin",
+    "chdir /elsewhere && git pull origin main",
+    "pushd /elsewhere && git ls-remote origin",
+    "popd && git fetch origin",
+  ])
+    assert.equal(
+      observeShellCommand(clone("owned-fork"), command).kind,
+      "unsupported",
+      command,
+    );
+  for (const command of [
+    "Set-Location /elsewhere; git fetch origin",
+    "sl /elsewhere; git pull origin main",
+    "Push-Location /elsewhere; git ls-remote origin",
+    "Pop-Location; git fetch origin",
+  ])
+    assert.equal(
+      observeShellCommand(clone("owned-fork"), command, { shell: "powershell" })
+        .kind,
+      "unsupported",
+      command,
+    );
+  assert.equal(
+    observeShellCommand(clone("owned-fork"), "echo ok && git fetch origin")
+      .kind,
+    "local",
+  );
 });
 
 test("gh api reads GET and HEAD, and everything else is a conservative write", () => {
@@ -859,8 +1201,129 @@ test("a compound command with a governed write is unresolved, not granted", () =
   ]) {
     const observed = observeShellCommand(clone("owned-fork"), command);
     assert.equal(observed.kind, "unsupported", command);
-    assert.equal(observed.readOnly, false, command);
+    assert.equal(observed.readOnly, command.startsWith("git fetch"), command);
     assert.equal(observed.capability, null, command);
+  }
+});
+
+test("compound reads preserve every destination for the ignore check", () => {
+  const observation = observeShellCommand(
+    clone("owned-fork"),
+    "echo before && git ls-remote https://github.com/simpsonm09/steam_wishlist_cleanup",
+  );
+  assert.equal(observation.kind, "local");
+  assert.deepEqual(
+    observation.destinationReads?.map((read) => read.destination),
+    [
+      {
+        host: "github.com",
+        owner: "simpsonm09",
+        repo: "steam_wishlist_cleanup",
+      },
+    ],
+  );
+  assert.equal(
+    observeShellCommand(clone("owned-fork"), "echo ok && git fetch --unknown")
+      .kind,
+    "unsupported",
+  );
+});
+
+test("bounded opaque-prefix premise table fails closed and keeps local controls", () => {
+  const table: Array<[string, string, string]> = [
+    [
+      "brace read",
+      "{ git fetch https://github.com/acme/demo; }",
+      "unsupported",
+    ],
+    ["brace cwd group", "{ cd /other; git fetch origin; }", "unsupported"],
+    ["brace write", "{ git push origin main; }", "unsupported"],
+    ["brace local control", "{ echo local; }", "local"],
+    [
+      "command read",
+      "command git fetch https://github.com/acme/demo",
+      "unsupported",
+    ],
+    ["env read", "env git fetch https://github.com/acme/demo", "unsupported"],
+    [
+      "env changed-config read",
+      "env GIT_DIR=/other git fetch origin",
+      "unsupported",
+    ],
+    [
+      "env split-string read",
+      "env -S 'git fetch https://github.com/acme/demo'",
+      "unsupported",
+    ],
+    ["env split-string write", "env -S 'git push origin main'", "unsupported"],
+    ["time read", "time git fetch https://github.com/acme/demo", "unsupported"],
+    ["exec read", "exec git fetch https://github.com/acme/demo", "unsupported"],
+    [
+      "nohup read",
+      "nohup git fetch https://github.com/acme/demo",
+      "unsupported",
+    ],
+    ["command write", "command git push origin main", "unsupported"],
+    ["env write", "env git push origin main", "unsupported"],
+    ["time write", "time git push origin main", "unsupported"],
+    ["exec write", "exec git push origin main", "unsupported"],
+    ["nohup write", "nohup git push origin main", "unsupported"],
+    ["local executable", "npm test", "local"],
+    ["local git control", "git status", "local"],
+    ["quoted command text", 'echo "gh pr create"', "local"],
+  ];
+  for (const [name, command, expected] of table) {
+    const observed = observeCommand(command, {
+      cwd: "/fake/worktree",
+      git: () => null,
+    });
+    assert.equal(observed.kind, expected, `${name}: ${command}`);
+    if (expected === "unsupported" && !name.startsWith("brace"))
+      assert.equal(observed.readOnly, !/push/.test(command), name);
+  }
+});
+
+test("else arms stay opaque while grouped local git and static assignments stay local", () => {
+  const table: Array<[string, string, string]> = [
+    [
+      "else git push",
+      "if false; then echo a; else git push origin main; fi",
+      "unsupported",
+    ],
+    [
+      "else gh write",
+      "if false; then :; else gh pr merge 52 -R simpsonm09-org/demo-repo --merge; fi",
+      "unsupported",
+    ],
+    [
+      "else ignored read",
+      "if false; then :; else git fetch https://github.com/simpsonm09/steam_wishlist_cleanup; fi",
+      "unsupported",
+    ],
+    ["brace status", "{ git status; }", "local"],
+    ["no-space subshell status", "(git status)", "local"],
+    ["subshell status", "( git status )", "local"],
+    ["brace log", "{ git log --oneline; }", "local"],
+    ["brace add", "{ git add .; }", "local"],
+    ["brace commit", "{ git commit -m x; }", "local"],
+    ["assignment-only segment", "X=1; echo hi", "local"],
+    [
+      "assignment with substitution remains unsupported",
+      "X=$(echo hi); echo hi",
+      "unsupported",
+    ],
+  ];
+  for (const [name, command, expected] of table) {
+    const observed = observeCommand(command, {
+      cwd: "/fake/worktree",
+      git: () => null,
+    });
+    assert.equal(observed.kind, expected, `${name}: ${command}`);
+    if (name === "else git push") assert.equal(observed.readOnly, false, name);
+    if (name === "else gh write")
+      assert.equal(observed.ghWriteSignal, true, name);
+    if (name === "else ignored read")
+      assert.equal(observed.readOnly, true, name);
   }
 });
 
@@ -1134,6 +1597,7 @@ test("the packaged resolver reaches the intended verdict for the whole policy ma
     const target = core.resolveDestination({
       roster,
       ownedForks: OWNED_FORKS,
+      ignore: { ignore: [] },
       localRepo,
       host: destination?.host ?? "github.com",
       destination: destination?.destination ?? "unknown/unknown",
@@ -1243,14 +1707,16 @@ test("the packaged resolver reaches the intended verdict for the whole policy ma
   }
 
   // The organization kind: the roster level decides, and `--prune` is a pushMain capability,
-  // so it stays in the organization's existing pushMain bucket (denied at propose, allowed at
-  // full) rather than inheriting the branch push's pushBranch.
+  // so it stays in the organization's existing pushMain bucket rather than inheriting the
+  // branch push's pushBranch; the published resolver allows it only for a default branch or tag.
   const orgCases: Array<[string, string, boolean]> = [
     ["git push origin feat/x", "propose", true],
     ["git push origin main", "propose", false],
     ["git push origin main", "full", true],
     ["git push origin --prune feat/x", "propose", false],
-    ["git push origin --prune feat/x", "full", true],
+    // `full` grants pushMain, while the published resolver limits that capability to default
+    // branch and tag refs; a feature ref combined with --prune is therefore still denied.
+    ["git push origin --prune feat/x", "full", false],
     [
       "gh pr create -R simpsonm09-org/demo-repo --base main --head feat/x",
       "propose",
