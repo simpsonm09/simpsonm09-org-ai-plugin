@@ -590,6 +590,7 @@ export function decideShell(input, deps) {
   }
   if (!repo)
     return unknownRepoDecision(
+      observation,
       observation.commandDirectory,
       governed,
       environment,
@@ -664,22 +665,33 @@ function unresolvedDecision(observation, governed, environment, codex) {
   return unresolvedAnswer(observation);
 }
 
-// The answer when the directory is not a fleet repository at all. A command without a `git
-// -C` is outside the fleet-only scope unless it is a governed gh write with an explicit
-// destination (handled by outsideFleetDestinationDecision); Codex still blocks every governed
-// write. A command that names its own directory with `-C` reaches a clone whose
-// local repository cannot be named, so the same write observed there fails closed instead of
-// passing: the write is denied, since it would leave the caller's directory for a clone the
-// fleet does not know.
+// The answer when the directory is not a fleet repository at all. Ordinary commands remain
+// outside the fleet-only scope unless they name a directory with `-C`; Codex still blocks
+// every governed write. A `git -C` clone the fleet cannot name fails closed, and an unsupported
+// shape without a parsed command directory also fails closed.
 /**
+ * @param {import("./lib/observation.mjs").Observation} observation
  * @param {string | null} commandDirectory the directory the command names with `-C`, or null
  * @param {boolean} governed
  * @param {string[]} environment
  * @param {boolean} codex
  * @returns {Decision}
  */
-function unknownRepoDecision(commandDirectory, governed, environment, codex) {
+function unknownRepoDecision(
+  observation,
+  commandDirectory,
+  governed,
+  environment,
+  codex,
+) {
   if (codex && governed) return codexWriteDenial();
+  if (observation.kind === "unsupported" && !commandDirectory)
+    return {
+      action: "deny",
+      repo: null,
+      level: FALLBACK_LEVEL,
+      reason: `${observation.reason}; unsupported command is denied`,
+    };
   if (!commandDirectory || !governed)
     return { action: "pass", repo: null, level: FALLBACK_LEVEL };
   if (environment.length > 0) return denyEnvironment(null, environment);
