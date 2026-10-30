@@ -100,9 +100,8 @@ test("outside-fleet admin writes use the explicitly pinned organization destinat
   }
 });
 
-test("outside-fleet organization merge follows the destination access level", () => {
-  const command =
-    "gh pr merge 52 -R simpsonm09-org/two-remote-repo --admin --merge";
+test("outside-fleet ordinary merge follows the destination access level", () => {
+  const command = "gh pr merge 52 -R simpsonm09-org/two-remote-repo -m --merge";
   writeCatalogLevels(workspace, {
     "demo-repo": "propose",
     "two-remote-repo": "merge",
@@ -287,7 +286,7 @@ test("an explicit allowed write outside the fleet passes at merge", () => {
     "two-remote-repo": "merge",
   });
   const decision = decide(
-    "gh pr merge 52 -R simpsonm09-org/two-remote-repo --admin --merge",
+    "gh pr merge 52 -R simpsonm09-org/two-remote-repo -m --merge",
   );
   assert.equal(decision.action, "pass");
   assert.equal(decision.level, "merge");

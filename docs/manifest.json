@@ -4,5 +4,13 @@
     "docs/features/pinned-gate-resolver.md",
     "docs/features/owned-fork-observer.md",
     "docs/features/standalone-owned-gate.md"
+  ],
+  "releaseNotes": [
+    "docs/release-notes/2026-10-15-pinned-gate-resolver.md",
+    "docs/release-notes/2026-10-22-standalone-owned-gate.md",
+    "docs/release-notes/2026-10-15-conservative-write-detection.md",
+    "docs/release-notes/2026-10-15-trust-direct-claude-plugin-copy.md",
+    "docs/release-notes/2026-10-22-fork-sync-context-diagnostic.md",
+    "docs/release-notes/2026-10-24-three-level-observer-consumer.md"
   ]
 }

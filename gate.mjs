@@ -553,6 +553,13 @@ export function decideShell(input, deps) {
   const command = canonicalCommand(programCommand(input.command, input.shell));
   const shell = input.shell === "powershell" ? "powershell" : "bash";
   const observation = observeFor(command, { cwd: deps.cwd, shell }, deps);
+  const destinationDecision = destinationReadDecision(
+    observation,
+    deps.resolve,
+  );
+  if (destinationDecision) return destinationDecision;
+  const unsupportedRead = unsupportedReadDecision(observation);
+  if (unsupportedRead) return unsupportedRead;
   // The local repository is the clone the command reaches, not always the tool's cwd: a
   // `git -C <path>` push reaches the `<path>` clone, whose git state the observation already
   // read, so the destination's fork must be classified against that clone's fleet name.
@@ -568,26 +575,16 @@ export function decideShell(input, deps) {
   if (found.unresolved)
     return unresolvedDecision(observation, governed, environment, codex);
   const repo = found.repo;
-  if (
-    !repo &&
-    !observation.commandDirectory &&
-    isOutsideFleetGhWrite(observation, governed)
-  ) {
-    if (
-      observation.program === "gh" &&
-      observation.destinationSource === "explicit" &&
-      observation.resolved &&
-      observation.destination?.host.toLowerCase() === "github.com"
-    )
-      return outsideFleetDestinationDecision(
-        command,
-        observation,
-        environment,
-        codex,
-        deps,
-      );
-    return outsideFleetUnpinnedWriteDecision(observation, environment, codex);
-  }
+  const outsideFleet = outsideFleetWriteDecision(
+    command,
+    observation,
+    governed,
+    repo,
+    environment,
+    codex,
+    deps,
+  );
+  if (outsideFleet) return outsideFleet;
   if (!repo)
     return unknownRepoDecision(
       observation.commandDirectory,
@@ -602,6 +599,87 @@ export function decideShell(input, deps) {
   if (governed && environment.length > 0)
     return denyEnvironment(repo, environment);
   return resolveDecision(command, repo, observation, governed, codex, deps);
+}
+
+function outsideFleetWriteDecision(
+  command,
+  observation,
+  governed,
+  repo,
+  environment,
+  codex,
+  deps,
+) {
+  if (
+    repo ||
+    observation.commandDirectory ||
+    !isOutsideFleetGhWrite(observation, governed)
+  )
+    return null;
+  if (
+    observation.program === "gh" &&
+    observation.destinationSource === "explicit" &&
+    observation.resolved &&
+    observation.destination?.host.toLowerCase() === "github.com"
+  )
+    return outsideFleetDestinationDecision(
+      command,
+      observation,
+      environment,
+      codex,
+      deps,
+    );
+  return outsideFleetUnpinnedWriteDecision(observation, environment, codex);
+}
+
+function unsupportedReadDecision(observation) {
+  if (observation.kind !== "unsupported" || observation.readOnly !== true)
+    return null;
+  return {
+    action: "deny",
+    repo: null,
+    level: FALLBACK_LEVEL,
+    reason: observation.reason || "the command could not be observed safely",
+  };
+}
+
+// Destination-bearing reads still consult the committed ignore list before any local,
+// unknown-repository, or public-read pass. An API that cannot answer this query fails closed.
+function destinationReadDecision(observation, resolveIntent) {
+  for (const read of observation.destinationReads ?? []) {
+    const decision = destinationReadDecision(read, resolveIntent);
+    if (decision) return decision;
+  }
+  if (observation.readOnly !== true || observation.destination === null)
+    return null;
+  const result = resolveIntent("", observation);
+  const resolved = parseResolverOutput(result.stdout);
+  if (result.code === 0 && resolved === null) {
+    return {
+      action: "deny",
+      repo: null,
+      level: FALLBACK_LEVEL,
+      reason: "the resolver returned an unsupported destination-read response",
+    };
+  }
+  if (resolved?.kind === "ignored") {
+    return {
+      action: "deny",
+      repo: null,
+      level: FALLBACK_LEVEL,
+      reason: "this destination is explicitly ignored by the committed policy",
+    };
+  }
+  if (result.code !== 0) {
+    return {
+      action: "deny",
+      repo: null,
+      level: FALLBACK_LEVEL,
+      reason:
+        "the committed ignore policy could not be checked for this destination read",
+    };
+  }
+  return null;
 }
 
 function isOutsideFleetGhWrite(observation, governed) {

@@ -27,15 +27,46 @@ reach the same decision.
 
 ## The observation
 
+### Policy-level GitHub command mapping
+
+The observer maps pull request create, edit, close, reopen, ready/draft changes, issue create,
+and issue/PR conversation comments to `openPr`. Positional `gh repo view` and `gh repo clone`
+targets, including GitHub URL aliases, identify the requested repository; a clone's local
+destination directory is not treated as a repository identity. A positional `gh repo fork`
+source is checked as the policy destination. Compound commands observe supported read segments
+individually and carry every named destination to the ignore check. An ignored target denies
+the compound; an unmodeled or unresolved read segment fails closed. A compound that changes
+directories with `cd`, `chdir`, `pushd`, `popd`, `Set-Location`, `sl`, `Push-Location`, or
+`Pop-Location` and also reads is unsupported: the observer does not emulate shell directory
+stack and path rules. Local-only compounds keep their existing pass behavior.
+Milestone create/edit/delete are repository administration. Pull request review submissions
+(`approve`, `request-changes`, or review-comment submissions) are marked `forbidden`; review REST and
+GraphQL writes use the same never-granted capability. This mapping controls supported
+`gh` command forms only; it does not grant access to browser, file, MCP, or arbitrary script
+paths.
+
+Repository reads remain public unless the destination is in the committed explicit ignore
+list. Supported destination-bearing `gh` and Git reads consult that list before local,
+unknown-repository, or public-read returns, including supported compound reads. Malformed
+compound reads and unmodeled Git read forms fail closed. If the resolver cannot load the
+committed ignore policy, the read fails closed. The API 5 consumer uses
+`loadCommittedIgnore` and passes its validated result into `resolveDestination`. The runtime
+and pin now match published API 5.
+
+The API 5 source matches published resolver commit
+`c036a58763dec27e597871abff9ae9804f2c3f3a`. This local source proposal does not install or
+activate the artifact in a workspace.
+
 ```js
 {
   kind,              // 'local' | 'read' | 'write' | 'unsupported' | 'ambiguous'
   program,           // 'git' | 'gh' | 'other'
   operation,         // 'none' | 'read' | 'push' | 'openPr' | 'mergePr' | 'admin' | 'unknown'
   capability,        // 'pushBranch' | 'pushMain' | 'openPr' | 'mergePr' | 'admin' | null
-  readOnly,          // true only for a local command or a known gh read
+  readOnly,          // internal signal; unsupported compounds can carry a readlike segment
   resolved,          // the destination and the refs are pinned
   destination,       // { host, owner, repo } | null
+  destinationReads,  // every supported destination-bearing read inside a compound command
   destinationSource, // 'explicit' | 'remote' | 'pushurl' | 'url' | 'git-default' | 'cwd' | 'none'
   refs,              // [{ kind: 'branch'|'tag'|'other'|'unknown', name, isDefault }]
   force, delete,     // the push flags that change what a refspec means
@@ -76,6 +107,15 @@ The destination is derived from git, never from a remote *name*:
   repository it belongs to. When that repository is not the resolved destination
   (case-insensitively), the destination is dropped and a governed write fails closed; a URL
   to the destination itself, a number, and a branch leave the destination unchanged.
+
+Destination-bearing Git reads are also observed for `git clone <url>`, and for `git fetch`,
+`git pull`, and `git ls-remote` when one URL or one configured remote identifies the target.
+Configured remote aliases are resolved through read-only Git config. An explicit URL is
+resolved with Git's read-only `ls-remote --get-url` mode, which applies the command's own
+`url.*.insteadOf` rules without contacting the remote. An implicit fetch/pull requires exactly
+one configured remote; `git fetch --all` and other multi-target forms are unsupported and fail
+closed. These are bounded forms of the existing command observer, not a general Git option
+parser or a universal command sandbox.
 
 The refs come from the refspecs, which are the positionals *after* the repository. git's
 grammar is `git push [<repository> [<refspec>…]]`, so the first positional is always the
@@ -121,8 +161,10 @@ would suggest.
   A first positional that is not a URL or a configured remote, and an empty-destination
   refspec (`src:`), are observed as unresolved rather than as a destination and a ref git
   would not reach.
-- `git -C <path>` and `git -c <key>=<value>`, passed through to every read, so the observation
-  follows the command's own directory and config. A cwd that is a worktree or a
+- `git -C <path>` and `git -c <key>=<value>`, passed through to every Git read, so the
+  observation follows the command's own directory and config, including URL rewrite rules.
+  For `fetch`, `pull`, `clone`, and `ls-remote`, bare `--recurse-submodules` is a flag and
+  `--recurse-submodules=<value>` is also supported. A cwd that is a worktree or a
   subdirectory of a clone observes as the clone.
 - `remote.<name>.push` and `remote.<name>.mirror` for a push that names no refspec, then
   `push.default` (`matching` is a multi-ref write, `current` and `upstream` name one branch),
@@ -197,18 +239,36 @@ observer cannot read at all (a persistent environment variable, which keeps its 
 the repository).
 
 - A wrapper or interpreter: `bash -c '…'`, `iex …`, `Start-Process …`, `xargs …`, an alias.
-  The program word is the wrapper, so the command is `local`. This is the same limit the
-  current gate documents.
+  These remain outside the observer's scope. The finite leading forms `command`, `env`,
+  `time`, `exec`, and `nohup` followed by a `git` or `gh` program, plus Bash brace groups,
+  subshells, negation, and the bounded `if`/`then`/`else`/`elif`/`for`/`do`/`while`/`until`
+  forms containing a governed Git/GitHub command, are `unsupported` because the observer does
+  not emulate their command, environment, or working-directory effects. Grouped Git/GitHub
+  commands classified as local (such as `git status`) and other local-only groups remain local.
+  Static assignment-only segments such as `X=1` remain local; assignments with shell expansion
+  are unsupported. For the bounded dynamic-assignment form, the observer sets `ghWriteSignal`
+  when the command text contains a `gh` program word, including a write inside `$(…)`; the gate
+  denies that signal outside the fleet without resolving or evaluating the expression. An
+  unsupported expanded assignment with no `gh` signal does not extend the outside-fleet Git
+  policy and may pass outside the fleet. Other
+  interpreters, aliases, scripts, and browser/file/MCP paths are not covered by this observer.
 - A git alias: `git <name>` where `alias.<name>` is a shell alias (`!…`) or expands to
   `push` is `unsupported`, so it is not granted. Any other alias is read as the command its
   name is, and an alias chain or a variable-built alias is not resolved. A gh alias
   (`gh alias set`) is the same limit and is `local`.
-- A compound command: an unquoted `;`, `&`, `|`, or newline splits the command, and each part
-  is checked for a governed write. If any part is one, the whole command is `unsupported`,
-  because the later parts are not parsed. If none is, the command is `local`, so a quoted
-  mention of a write and a pipeline whose later stage only mentions one stay `local`, as they
-  did before. A heredoc body is not part of this split: it is skipped to its terminator line as
-  data (see Supported forms), and only an unquoted body's command substitutions are read.
+- A compound command: an unquoted `;`, `&`, `|`, or newline splits the command. If any part
+  looks like a governed write, the whole command is `unsupported`. Otherwise supported parts
+  are observed so each named read destination reaches the ignore check. An unresolved or
+  unsupported read part fails closed; a compound with only local commands stays `local`. Opaque
+  grouped or prefixed parts aggregate readlike and GitHub-write signals across all segments.
+  Here, `readOnly` is an internal signal: any recognized read or unsupported segment sets it,
+  even when the overall compound also contains a write. This makes mixed write/read composites
+  (including merge plus view) conservatively deny as unsupported reads. Single-command
+  outside-fleet Git policy is unchanged; mixed commands containing a governed write and a read
+  now conservatively deny, including Git-only push-plus-fetch compounds. A quoted mention of a
+  write and a pipeline whose later stage only mentions one stay `local`.
+  A heredoc body is not part of this split: it is skipped to its terminator line as data (see
+  Supported forms), and only an unquoted body's command substitutions are read.
 - A PowerShell here-string (`@"`…`"@`, `@'`…`'@`): a newline inside it splits the command as any
   other newline would, because the observer models the Bash `<<` heredoc only. Put a here-string
   in a script file, or use a single-quoted argument, rather than a multi-line body.
@@ -225,8 +285,15 @@ the repository).
   (`GH_TOKEN`, `GITHUB_TOKEN`) is never observed, printed, or logged.
 - A git global option other than `-C` and `-c` (`--git-dir`, `--work-tree`, `--namespace`),
   and a `git push` flag outside the documented set: `unsupported`.
-- A gh verb with no precise capability in the observer (for example `gh issue create`,
-  `gh pr edit`, `gh label create`, `gh codespace …`): the catch-all `admin` write. An
+- A malformed URL-like `gh repo` positional stays unresolved for view, clone, fork, edit,
+  rename, archive, unarchive, sync, and delete forms. GitHub-like Git URLs with unparsed path/escape forms stay unsupported
+  reads. The observer does not claim how Git, GitHub, or an API router normalizes those URLs.
+- Review-comment item mutations (`gh api` PATCH/DELETE under `pulls/comments/<id>`) are
+  `forbidden`; GET remains a read. Encoded or repeated-slash review paths that are ambiguous
+  at this boundary are also forbidden for writes. This is a conservative classification, not
+  a claim about server-side path normalization.
+- A gh verb with no precise capability in the observer (for example `gh label create`,
+  `gh codespace …`): the catch-all `admin` write. An
   unmodeled verb is never a read, so it can never be granted as one.
 - `gh api` with an unknown explicit method (`-X OPTIONS`, `-XPOSTED`): a conservative `admin`
   write, as is any request body in any of gh's spellings (`-f`, `-F`, `--field`,

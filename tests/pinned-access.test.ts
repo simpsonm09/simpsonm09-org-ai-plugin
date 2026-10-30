@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -48,6 +49,7 @@ const apiShape = {
   loadCommittedCatalog() {},
   loadCommittedOwnedForks() {},
   loadCommittedOwnedRepositories() {},
+  loadCommittedIgnore() {},
   resolveLevel() {},
   resolveDestination() {},
   decideTarget() {},
@@ -58,19 +60,20 @@ test("the packaged resolver pin names the reviewed artifact and API contract", (
     RESOLVER_PIN.repository,
     "simpsonm09-org/simpsonm09-repo-standard",
   );
-  assert.equal(RESOLVER_PIN.commit, "c0829a2f83636f9374fb079bdd3e2d34a56f5c42");
+  assert.equal(RESOLVER_PIN.commit, "c036a58763dec27e597871abff9ae9804f2c3f3a");
   assert.equal(RESOLVER_PIN.sourcePath, "scripts/agent-access.mjs");
   assert.match(RESOLVER_PIN.sha256, /^[0-9a-f]{64}$/);
   assert.equal(
     RESOLVER_PIN.sha256,
-    "68f24574a9b7f0653972d4cf59010a9b9a2e8e3f88b4cfef970b85915ed414c0",
+    "54d099acaa7d166a9f3650211b94082a5c45d19268746507a728d116fd6e6342",
   );
-  assert.equal(RESOLVER_PIN.apiVersion, 3);
+  assert.equal(RESOLVER_PIN.apiVersion, 5);
   assert.equal(hasPinnedAccessApi(apiShape), true);
   // Every destination export is required: an older bundle without them cannot load.
   for (const missing of [
     "loadCommittedOwnedForks",
     "loadCommittedOwnedRepositories",
+    "loadCommittedIgnore",
     "resolveDestination",
     "decideTarget",
   ]) {
@@ -183,6 +186,277 @@ test("the packaged resolver uses committed catalog data for an organization dest
     );
   } finally {
     removeDir(dir);
+  }
+});
+
+test("API 5 pinned consumer reads committed ignore before public-read decisions", async () => {
+  const source = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "fixtures",
+    "agent-access-api5-published.source",
+  );
+  const bytes = readFileSync(source);
+  assert.equal(
+    createHash("sha256").update(bytes).digest("hex"),
+    RESOLVER_PIN.sha256,
+    "exercise the exact published resolver source bytes",
+  );
+  const api = await loadPinnedAccessApi();
+  assert.ok(api);
+  assert.equal(typeof api.loadCommittedIgnore, "function");
+
+  const dir = tempDir("api5-ignore-consumer-");
+  try {
+    const { workspace } = buildWorkspace(dir, { level: "full" });
+    const catalog = defaultScripts(workspace).catalog;
+    const ignoredReads = [
+      "simpsonm09/pdf_field_automation_acrobat",
+      "simpsonm09-org/pdf_field_automation_acrobat",
+      "simpsonm09/steam_wishlist_cleanup",
+      "simpsonm09-org/steam_wishlist_cleanup",
+      "simpsonm09/The_Gaming_Index_Video_Game_Database_Final_Capstone",
+      "simpsonm09-org/The_Gaming_Index_Video_Game_Database_Final_Capstone",
+      "simpsonm09/steam_wishlist_cleanup",
+    ].map((destination) =>
+      observeShellCommand(
+        join(workspace, "projects", "repos", "demo-repo"),
+        `gh repo view -R ${destination}`,
+      ),
+    );
+    const publicRead = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "gh repo view -R acme/public-repo",
+    );
+    const issueCreate = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "gh issue create --title fixture -R simpsonm09-org/demo-repo",
+    );
+    const reviewApproval = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "gh pr review 1 --approve -R simpsonm09-org/demo-repo",
+    );
+    const restReview = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "gh api -X POST repos/simpsonm09-org/demo-repo/pulls/1/reviews -f event=APPROVE",
+    );
+    const ignoredClone = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "git clone https://github.com/simpsonm09-org/steam_wishlist_cleanup.git",
+    );
+    const demo = join(workspace, "projects", "repos", "demo-repo");
+    const rewrittenUrlCommand =
+      "git -c url.https://github.com/simpsonm09/steam_wishlist_cleanup.insteadOf=https://github.com/acme/public-repo ls-remote https://github.com/acme/public-repo";
+    const rewrittenUrlRead = observeShellCommand(demo, rewrittenUrlCommand);
+    assert.equal(rewrittenUrlRead.destination?.owner, "simpsonm09");
+    assert.equal(rewrittenUrlRead.destination?.repo, "steam_wishlist_cleanup");
+    const ignoredRecurseReads = [
+      `git fetch --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup`,
+      `git pull --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup`,
+      `git clone --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup demo`,
+      `echo x && git fetch --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup`,
+    ].map((command) => observeShellCommand(demo, command));
+    const ignoredFork = observeShellCommand(
+      demo,
+      "gh repo fork simpsonm09/steam_wishlist_cleanup",
+    );
+    const thirdPartyFork = observeShellCommand(
+      demo,
+      "gh repo fork acme/ordinary-repo",
+    );
+    const directoryChangingRead = observeShellCommand(
+      demo,
+      "cd ../other && git fetch origin",
+    );
+    const positionalIgnored = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "gh repo view https://github.com/simpsonm09/steam_wishlist_cleanup",
+    );
+    const publicLsRemote = observeShellCommand(
+      join(workspace, "projects", "repos", "demo-repo"),
+      "git ls-remote https://github.com/acme/public-repo.git",
+    );
+    for (const ignoredRead of ignoredReads)
+      assert.equal(
+        resolveAccess(api, catalog, "demo-repo", ignoredRead).code,
+        1,
+      );
+    assert.equal(resolveAccess(api, catalog, "demo-repo", publicRead).code, 0);
+    assert.equal(resolveAccess(api, catalog, "demo-repo", issueCreate).code, 0);
+    assert.equal(
+      resolveAccess(api, catalog, "demo-repo", reviewApproval).code,
+      1,
+    );
+    assert.equal(resolveAccess(api, catalog, "demo-repo", restReview).code, 1);
+    assert.equal(
+      resolveAccess(api, catalog, "demo-repo", ignoredClone).code,
+      1,
+    );
+    assert.equal(
+      resolveAccess(api, catalog, "demo-repo", rewrittenUrlRead).code,
+      1,
+      "the command-scoped insteadOf target reaches the committed ignore check",
+    );
+    for (const read of ignoredRecurseReads.slice(0, 3))
+      assert.equal(resolveAccess(api, catalog, "demo-repo", read).code, 1);
+    assert.equal(resolveAccess(api, catalog, "demo-repo", ignoredFork).code, 1);
+    assert.equal(
+      resolveAccess(api, catalog, "demo-repo", thirdPartyFork).code,
+      1,
+      "the source identity does not broaden the policy for an unlisted repository",
+    );
+    assert.equal(directoryChangingRead.kind, "unsupported");
+    assert.equal(
+      resolveAccess(api, catalog, "demo-repo", positionalIgnored).code,
+      1,
+    );
+    assert.equal(
+      resolveAccess(api, catalog, "demo-repo", publicLsRemote).code,
+      0,
+    );
+    const decide = (command: string) =>
+      decideShell(
+        { command },
+        {
+          cwd: demo,
+          workspaceRoot: workspace,
+          lookup: () => ({ repo: "demo-repo" }),
+          resolve: (repo, observation) =>
+            resolveAccess(api, catalog, repo, observation),
+          git: (cwd) => gitReader(cwd),
+        },
+      );
+    assert.equal(
+      decide("gh issue create --title fixture -R simpsonm09-org/demo-repo")
+        .action,
+      "inject",
+    );
+    assert.equal(
+      decide("gh pr review 1 --approve -R simpsonm09-org/demo-repo").action,
+      "deny",
+    );
+    assert.equal(
+      decide(
+        "gh api -X POST repos/simpsonm09-org/demo-repo/pulls/1/reviews -f event=APPROVE",
+      ).action,
+      "deny",
+    );
+    assert.equal(decide(rewrittenUrlCommand).action, "deny");
+    for (const command of [
+      `git fetch --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup`,
+      `git pull --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup`,
+      `git clone --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup demo`,
+      `echo x && git fetch --recurse-submodules https://github.com/simpsonm09/steam_wishlist_cleanup`,
+      "gh repo fork simpsonm09/steam_wishlist_cleanup",
+      "cd ../other && git fetch origin",
+    ])
+      assert.equal(decide(command).action, "deny", command);
+    assert.equal(
+      decide("gh pr merge 1 --admin -R simpsonm09-org/demo-repo").action,
+      "deny",
+    );
+    assert.equal(
+      decide("gh repo view -R simpsonm09-org/steam_wishlist_cleanup").action,
+      "deny",
+    );
+    assert.equal(
+      decide("echo before && gh repo view simpsonm09/steam_wishlist_cleanup")
+        .action,
+      "deny",
+    );
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test("API 5 denies destination decisions when committed ignore policy is invalid", async (t) => {
+  const scenarios = [
+    { name: "missing ignore.json", content: null },
+    { name: "corrupt ignore.json", content: "{" },
+    {
+      name: "ignore.json with unknown top-level field",
+      content: JSON.stringify({ ignore: [], schema: 1 }),
+    },
+  ];
+  const decisions = [
+    {
+      name: "ignored destination read",
+      command: "gh repo view -R simpsonm09/steam_wishlist_cleanup",
+    },
+    {
+      name: "public destination read",
+      command: "gh repo view -R acme/public-repo",
+    },
+    {
+      name: "organization write",
+      command:
+        "gh pr create -R simpsonm09-org/demo-repo --base main --head feat/x",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const dir = tempDir("pinned-resolver-invalid-ignore-");
+      try {
+        const { workspace } = buildWorkspace(dir, { level: "full" });
+        const catalog = defaultScripts(workspace).catalog;
+        const ignorePath = join(catalog, "ignore.json");
+        if (scenario.content === null) {
+          execFileSync("git", ["-C", catalog, "rm", "--quiet", "ignore.json"], {
+            windowsHide: true,
+            stdio: "ignore",
+          });
+        } else {
+          writeFileSync(ignorePath, `${scenario.content}\n`);
+          execFileSync("git", ["-C", catalog, "add", "ignore.json"], {
+            windowsHide: true,
+            stdio: "ignore",
+          });
+        }
+        execFileSync(
+          "git",
+          [
+            "-C",
+            catalog,
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "-m",
+            "invalid ignore fixture",
+          ],
+          {
+            windowsHide: true,
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "fixture",
+              GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+              GIT_COMMITTER_NAME: "fixture",
+              GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+            },
+            stdio: "ignore",
+          },
+        );
+        execFileSync(
+          "git",
+          ["-C", catalog, "update-ref", "refs/remotes/upstream/main", "HEAD"],
+          { windowsHide: true, stdio: "ignore" },
+        );
+
+        const pinnedApi = await loadAccessApi(defaultScripts(workspace).access);
+        assert.ok(pinnedApi);
+        const cwd = join(workspace, "projects", "repos", "demo-repo");
+        // These command strings are inputs to the observer only; no shell command is run.
+        for (const { name, command } of decisions) {
+          const observation = observeShellCommand(cwd, command);
+          assert.notEqual(
+            resolveAccess(pinnedApi, catalog, "demo-repo", observation).code,
+            0,
+            `${scenario.name}: ${name}: ${command}`,
+          );
+        }
+      } finally {
+        removeDir(dir);
+      }
+    });
   }
 });
 
